@@ -67,12 +67,18 @@ io.on("connection", (socket) => {
 
       socket.join(roomId);
 
+      // Notify other participants about new user
+      socket.to(roomId).emit("participantJoined", {
+        id: socket.id,
+        joinedAt: new Date().toISOString()
+      });
+
       // Send router RTP capabilities
       callback({
         rtpCapabilities: currentRoom.getRouterRtpCapabilities(),
       });
 
-      console.log(`User ${socket.id} joined room ${roomId}`);
+      console.log(`Participant ${socket.id} joined room ${roomId}`);
     } catch (error: any) {
       console.error("Error joining room:", error);
       callback({ error: error.message });
@@ -143,10 +149,13 @@ io.on("connection", (socket) => {
       // Start HLS transcoding for video producers
       if (kind === "video") {
         try {
-          await hlsTranscoder.startTranscodingFromMediasoup(
-            socket.id,
-            rtpParameters
-          );
+          // Temporarily disable HLS transcoding to focus on WebRTC
+          // TODO: Implement proper MediaSoup to HLS transcoding pipeline
+          console.log("HLS transcoding temporarily disabled for debugging");
+          // await hlsTranscoder.startTranscodingFromMediasoup(
+          //   socket.id,
+          //   rtpParameters
+          // );
         } catch (hlsError) {
           console.error("HLS transcoding error:", hlsError);
           // Continue without HLS - WebRTC still works
@@ -154,7 +163,12 @@ io.on("connection", (socket) => {
       }
 
       // Notify other participants
-      socket.to(currentRoom.id).emit("newProducer", { producerId, kind });
+      socket.to(currentRoom.id).emit("newProducer", { 
+        producerId, 
+        kind,
+        participantId: socket.id,
+        timestamp: new Date().toISOString()
+      });
 
       callback({ producerId });
     } catch (error: any) {
@@ -192,15 +206,25 @@ io.on("connection", (socket) => {
 
       const { consumerId } = data;
       await currentRoom.resumeConsumer(socket.id, consumerId);
-      callback({ success: true });
+      if (callback && typeof callback === "function") {
+        callback({ success: true });
+      }
     } catch (error: any) {
       console.error("Error resuming consumer:", error);
-      callback({ error: error.message });
+      if (callback && typeof callback === "function") {
+        callback({ error: error.message });
+      }
     }
   });
 
   socket.on("leaveRoom", () => {
     if (currentRoom) {
+      // Notify other participants about user leaving
+      socket.to(currentRoom.id).emit("participantLeft", {
+        id: socket.id,
+        leftAt: new Date().toISOString()
+      });
+
       currentRoom.removeParticipant(socket.id);
       socket.leave(currentRoom.id);
 
@@ -220,6 +244,12 @@ io.on("connection", (socket) => {
     console.log(`Client disconnected: ${socket.id}`);
 
     if (currentRoom) {
+      // Notify other participants about user leaving
+      socket.to(currentRoom.id).emit("participantLeft", {
+        id: socket.id,
+        leftAt: new Date().toISOString()
+      });
+
       currentRoom.removeParticipant(socket.id);
       socket.leave(currentRoom.id);
 

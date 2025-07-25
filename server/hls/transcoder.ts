@@ -111,7 +111,7 @@ export class HLSTranscoder {
     const segmentPattern = path.join(outputDir, "segment_%03d.ts");
 
     // Create SDP file for mediasoup RTP stream
-    const sdpContent = this.generateSDP(rtpParameters);
+    const sdpContent = this.generateSDP(rtpParameters, streamId);
     const sdpPath = path.join(outputDir, "input.sdp");
     fs.writeFileSync(sdpPath, sdpContent);
 
@@ -159,21 +159,37 @@ export class HLSTranscoder {
     });
   }
 
-  private generateSDP(rtpParameters: any): string {
-    // Basic SDP generation - would need more sophisticated implementation
-    // for production use with proper codec parameters from mediasoup
+  private generateSDP(rtpParameters: any, streamId: string): string {
+    // Generate unique ports for each stream to avoid conflicts
+    const basePort = 5000;
+    const streamHash = this.hashString(streamId);
+    const videoPort = basePort + (streamHash % 1000) * 2; // Even ports for video
+    const audioPort = videoPort + 1; // Odd ports for audio
+
+    // More sophisticated SDP generation with unique ports
     return `v=0
 o=- 0 0 IN IP4 127.0.0.1
-s=mediasoup
+s=mediasoup-${streamId}
 c=IN IP4 127.0.0.1
 t=0 0
-m=video 5004 RTP/AVP 96
+m=video ${videoPort} RTP/AVP 96
 a=rtpmap:96 H264/90000
+a=fmtp:96 profile-level-id=42e01f;packetization-mode=1
 a=recvonly
-m=audio 5006 RTP/AVP 97
+m=audio ${audioPort} RTP/AVP 97
 a=rtpmap:97 opus/48000/2
 a=recvonly
 `;
+  }
+
+  private hashString(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
   }
 
   stopTranscoding(streamId: string): void {

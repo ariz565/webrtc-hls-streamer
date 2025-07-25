@@ -4,11 +4,19 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { MediaDeviceManager } from "@/lib/webrtc/media-devices";
 import { MediasoupClient } from "@/lib/webrtc/mediasoup-client";
 
+interface Participant {
+  id: string;
+  track?: MediaStreamTrack;
+  isAudioEnabled?: boolean;
+  isVideoEnabled?: boolean;
+  joinedAt?: Date;
+}
+
 export default function StreamPage() {
   const [isConnected, setIsConnected] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [videoEnabled, setVideoEnabled] = useState(false);
-  const [participants, setParticipants] = useState<any[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<
@@ -25,93 +33,158 @@ export default function StreamPage() {
 
   const handleNewRemoteStream = useCallback((event: any) => {
     const { track, consumerId } = event.detail;
-    setParticipants((prev) => [...prev, { id: consumerId, track }]);
+    console.log("New remote stream received:", { track, consumerId });
+
+    setParticipants((prev) => {
+      const existingIndex = prev.findIndex((p) => p.id === consumerId);
+      if (existingIndex >= 0) {
+        // Update existing participant
+        const updated = [...prev];
+        updated[existingIndex] = {
+          ...updated[existingIndex],
+          track,
+          isVideoEnabled: track?.kind === "video",
+          isAudioEnabled: track?.kind === "audio",
+        };
+        return updated;
+      } else {
+        // Add new participant
+        return [
+          ...prev,
+          {
+            id: consumerId,
+            track,
+            isVideoEnabled: track?.kind === "video",
+            isAudioEnabled: track?.kind === "audio",
+            joinedAt: new Date(),
+          },
+        ];
+      }
+    });
+  }, []);
+
+  const handleParticipantJoined = useCallback((event: any) => {
+    const participantData = event.detail;
+    console.log("Participant joined:", participantData);
+
+    setParticipants((prev) => {
+      const exists = prev.find((p) => p.id === participantData.id);
+      if (!exists) {
+        return [
+          ...prev,
+          {
+            id: participantData.id,
+            joinedAt: new Date(),
+            isAudioEnabled: false,
+            isVideoEnabled: false,
+          },
+        ];
+      }
+      return prev;
+    });
+  }, []);
+
+  const handleParticipantLeft = useCallback((event: any) => {
+    const participantData = event.detail;
+    console.log("Participant left:", participantData);
+
+    setParticipants((prev) => prev.filter((p) => p.id !== participantData.id));
   }, []);
 
   useEffect(() => {
     console.log("Stream page loaded");
+
+    // Set up event listeners
     window.addEventListener("newRemoteStream", handleNewRemoteStream);
+    window.addEventListener("participantJoined", handleParticipantJoined);
+    window.addEventListener("participantLeft", handleParticipantLeft);
+
     const currentMediaManager = mediaDeviceManager.current;
 
     return () => {
       window.removeEventListener("newRemoteStream", handleNewRemoteStream);
+      window.removeEventListener("participantJoined", handleParticipantJoined);
+      window.removeEventListener("participantLeft", handleParticipantLeft);
       currentMediaManager.stopLocalStream();
     };
-  }, [handleNewRemoteStream]);
+  }, [handleNewRemoteStream, handleParticipantJoined, handleParticipantLeft]);
 
   const toggleAudio = async () => {
     try {
-      if (isConnected) {
-        const newAudioState = !audioEnabled;
-        mediaDeviceManager.current.toggleTrack("audio", newAudioState);
-        setAudioEnabled(newAudioState);
-      } else {
+      if (!isConnected) {
         setError("Please join a room first");
+        return;
       }
-    } catch (err) {
+
+      setIsLoading(true);
+
+      if (!audioEnabled) {
+        // First time enabling audio - get media access and start producing
+        const stream = await mediaDeviceManager.current.getUserMedia({
+          audio: true,
+          video: false, // Only request audio
+        });
+
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          await mediasoupClient.current.produce(audioTrack);
+          setAudioEnabled(true);
+          setDevicePermissions((prev) => ({ ...prev, microphone: true }));
+        }
+      } else {
+        // Toggle existing audio
+        mediaDeviceManager.current.toggleTrack("audio", false);
+        setAudioEnabled(false);
+      }
+    } catch (err: any) {
       console.error("Error toggling audio:", err);
-      setError("Failed to toggle audio");
+      setError("Failed to access microphone. Please check permissions.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const toggleVideo = async () => {
     try {
-      if (isConnected) {
-        const newVideoState = !videoEnabled;
-        mediaDeviceManager.current.toggleTrack("video", newVideoState);
-        setVideoEnabled(newVideoState);
+      if (!isConnected) {
+        setError("Please join a room first");
+        return;
+      }
 
-        if (!newVideoState && localVideoRef.current) {
-          localVideoRef.current.style.opacity = "0.3";
-        } else if (newVideoState && localVideoRef.current) {
-          localVideoRef.current.style.opacity = "1";
+      setIsLoading(true);
+
+      if (!videoEnabled) {
+        // First time enabling video - get media access and start producing
+        const stream = await mediaDeviceManager.current.getUserMedia({
+          video: true,
+          audio: false, // Only request video
+        });
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
         }
-      } else {
-        try {
-          const stream = await mediaDeviceManager.current.getUserMedia({
-            video: true,
-            audio: audioEnabled,
-          });
 
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = stream;
-          }
-
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack) {
+          await mediasoupClient.current.produce(videoTrack);
           setVideoEnabled(true);
           setDevicePermissions((prev) => ({ ...prev, camera: true }));
-        } catch (err) {
-          console.error("Error starting video:", err);
-          setError("Failed to access camera. Please check permissions.");
+        }
+      } else {
+        // Toggle existing video
+        mediaDeviceManager.current.toggleTrack("video", false);
+        setVideoEnabled(false);
+
+        if (localVideoRef.current) {
+          localVideoRef.current.style.opacity = "0.3";
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error toggling video:", err);
-      setError("Failed to toggle video");
+      setError("Failed to access camera. Please check permissions.");
+    } finally {
+      setIsLoading(false);
     }
-  };
-
-  const stopVideo = () => {
-    // Stop video track using MediaDeviceManager
-    mediaDeviceManager.current.stopTrack("video");
-
-    // Close the video producer on mediasoup
-    mediasoupClient.current.closeProducer("video");
-
-    setVideoEnabled(false);
-    setDevicePermissions((prev) => ({ ...prev, camera: false }));
-    console.log("Video stopped and producer closed");
-  };
-
-  const stopAudio = () => {
-    // Stop audio track using MediaDeviceManager
-    mediaDeviceManager.current.stopTrack("audio");
-
-    // Close the audio producer on mediasoup
-    mediasoupClient.current.closeProducer("audio");
-
-    setAudioEnabled(false);
-    setDevicePermissions((prev) => ({ ...prev, microphone: false }));
-    console.log("Audio stopped and producer closed");
   };
 
   const stopAllMedia = () => {
@@ -130,35 +203,13 @@ export default function StreamPage() {
       setError(null);
       setConnectionStatus("connecting");
 
-      // Join room - this will create both transports automatically
+      // Join room without any media first - just like Google Meet
       await mediasoupClient.current.joinRoom("default-room");
-
-      const stream = await mediaDeviceManager.current.getUserMedia({
-        video: true,
-        audio: true,
-      });
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      const videoTrack = stream.getVideoTracks()[0];
-      const audioTrack = stream.getAudioTracks()[0];
-
-      if (videoTrack) {
-        await mediasoupClient.current.produce(videoTrack);
-        setVideoEnabled(true);
-        setDevicePermissions((prev) => ({ ...prev, camera: true }));
-      }
-
-      if (audioTrack) {
-        await mediasoupClient.current.produce(audioTrack);
-        setAudioEnabled(true);
-        setDevicePermissions((prev) => ({ ...prev, microphone: true }));
-      }
 
       setIsConnected(true);
       setConnectionStatus("connected");
+
+      console.log("Joined room successfully - no media started yet");
     } catch (err: any) {
       console.error("Error joining room:", err);
       setError(err.message || "Failed to join room");
@@ -180,11 +231,11 @@ export default function StreamPage() {
   const getStatusColor = () => {
     switch (connectionStatus) {
       case "connected":
-        return "text-green-400";
+        return "text-green-600";
       case "connecting":
-        return "text-yellow-400";
+        return "text-amber-600";
       default:
-        return "text-red-400";
+        return "text-red-600";
     }
   };
 
@@ -200,27 +251,39 @@ export default function StreamPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      {/* Clean Header */}
-      <div className="bg-slate-900/90 backdrop-blur-sm border-b border-slate-700 sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-6 py-4">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-purple-50">
+      {/* Modern Navbar */}
+      <nav className="bg-white/95 backdrop-blur-lg border-b border-gray-200 sticky top-0 z-50 shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-2xl font-bold text-white">
-                Fermion Stream
-              </h1>
-              <p className={`text-sm ${getStatusColor()}`}>
-                {getStatusText()}
-              </p>
+            <div className="flex items-center gap-8">
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent">
+                  Fermion Stream
+                </h1>
+                <p className={`text-sm font-medium ${getStatusColor()}`}>
+                  {getStatusText()}
+                </p>
+              </div>
+
+              <div className="hidden md:flex items-center gap-6 text-sm">
+                <a
+                  href="/watch"
+                  className="text-gray-600 hover:text-purple-600 transition-colors font-medium"
+                >
+                  Watch Streams
+                </a>
+                <span className="text-gray-400">Live Broadcasting</span>
+              </div>
             </div>
 
             {error && (
-              <div className="bg-red-500/10 border border-red-500/30 text-red-300 px-4 py-2 rounded-lg flex items-center gap-2">
-                <span className="text-red-400">⚠</span>
-                <span className="text-sm">{error}</span>
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg">
+                <span className="text-red-500 text-lg">⚠</span>
+                <span className="text-sm font-medium">{error}</span>
                 <button
                   onClick={() => setError(null)}
-                  className="ml-2 text-red-400 hover:text-red-300 text-lg"
+                  className="ml-2 text-red-500 hover:text-red-700 text-lg font-bold"
                 >
                   ×
                 </button>
@@ -228,170 +291,258 @@ export default function StreamPage() {
             )}
           </div>
         </div>
-      </div>
+      </nav>
 
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        {/* Main Video Container */}
-        <div className="bg-slate-800/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-700 shadow-2xl">
-          
-          {/* Video Area */}
-          <div className="relative aspect-video bg-slate-900 rounded-xl overflow-hidden mb-6">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className={`w-full h-full object-cover ${videoEnabled ? 'block' : 'hidden'}`}
-            />
-            
-            {!videoEnabled && (
-              <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800">
-                <div className="text-center">
-                  <div className="w-16 h-16 mx-auto mb-4 bg-slate-700 rounded-full flex items-center justify-center">
-                    <span className="text-2xl">�</span>
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        <div className="grid grid-cols-12 gap-6">
+          {/* Main Video Area - Left Side (9 columns) */}
+          <div className="col-span-12 lg:col-span-9">
+            <div className="bg-white/80 backdrop-blur-lg rounded-3xl p-8 border border-gray-200 shadow-2xl shadow-gray-200/50">
+              {/* Compact Video Area */}
+              <div className="relative aspect-video bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl overflow-hidden mb-8 max-h-[400px] shadow-2xl">
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className={`w-full h-full object-cover ${
+                    videoEnabled ? "block" : "hidden"
+                  }`}
+                />
+
+                {!videoEnabled && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+                    <div className="text-center">
+                      <div className="w-20 h-20 mx-auto mb-6 bg-gradient-to-br from-gray-700 to-gray-600 rounded-2xl flex items-center justify-center shadow-xl">
+                        <span className="text-3xl">📷</span>
+                      </div>
+                      <p className="text-gray-300 text-xl font-medium mb-2">
+                        {isConnected ? "Camera is off" : "Not connected"}
+                      </p>
+                      {isConnected && (
+                        <p className="text-slate-500 text-sm mt-2">
+                          Click the camera button to turn on your video
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <p className="text-slate-400 text-lg">Camera is off</p>
+                )}
+
+                {/* Live Indicator */}
+                {isConnected && (
+                  <div className="absolute top-6 left-6">
+                    <div className="bg-gradient-to-r from-red-500 to-red-600 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2 shadow-lg shadow-red-500/30">
+                      <div className="w-2.5 h-2.5 bg-white rounded-full animate-pulse"></div>
+                      LIVE
+                    </div>
+                  </div>
+                )}
+
+                {/* You Label */}
+                <div className="absolute bottom-6 left-6">
+                  <div className="bg-black/60 backdrop-blur-sm text-white px-4 py-2 rounded-full text-sm font-medium border border-white/20">
+                    You {audioEnabled && "🎤"} {videoEnabled && "📹"}
+                  </div>
                 </div>
               </div>
-            )}
 
-            {/* Live Indicator */}
-            {isConnected && (
-              <div className="absolute top-4 left-4">
-                <div className="bg-red-500 text-white px-3 py-1 rounded-full text-sm font-medium flex items-center gap-2">
-                  <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-                  LIVE
-                </div>
-              </div>
-            )}
-
-            {/* Participant Count */}
-            {isConnected && (
-              <div className="absolute top-4 right-4">
-                <div className="bg-slate-900/80 text-white px-3 py-1 rounded-full text-sm font-medium">
-                  {participants.length + 1} participant{participants.length !== 0 ? 's' : ''}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Clean Control Panel */}
-          <div className="flex items-center justify-center gap-4">
-            
-            {/* Main Action Button */}
-            {!isConnected ? (
-              <button
-                onClick={joinRoom}
-                disabled={isLoading}
-                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-600/50 disabled:cursor-not-allowed text-white px-8 py-3 rounded-xl font-semibold transition-all duration-200 flex items-center gap-3 shadow-lg hover:shadow-xl min-w-[140px] justify-center"
-              >
-                {isLoading ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                    Starting...
-                  </>
+              {/* Control Panel */}
+              <div className="flex items-center justify-center gap-4 mb-6">
+                {/* Main Action Button */}
+                {!isConnected ? (
+                  <button
+                    onClick={joinRoom}
+                    disabled={isLoading}
+                    className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed text-white px-8 py-3 rounded-xl font-bold transition-all duration-200 flex items-center gap-3 shadow-lg hover:shadow-xl min-w-[140px] justify-center"
+                  >
+                    {isLoading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                        Joining...
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-lg">🚪</span>
+                        Join Room
+                      </>
+                    )}
+                  </button>
                 ) : (
+                  <button
+                    onClick={leaveRoom}
+                    className="bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white px-8 py-3 rounded-xl font-bold transition-all duration-200 flex items-center gap-3 shadow-lg hover:shadow-xl"
+                  >
+                    <span>🚪</span>
+                    Leave Room
+                  </button>
+                )}
+
+                {/* Media Controls - Show when connected */}
+                {isConnected && (
                   <>
-                    <span className="text-lg">●</span>
-                    Go Live
+                    <button
+                      onClick={toggleAudio}
+                      disabled={isLoading}
+                      className={`p-4 rounded-xl font-bold transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 ${
+                        audioEnabled
+                          ? "bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white"
+                          : "bg-gradient-to-r from-gray-400 to-gray-500 hover:from-gray-500 hover:to-gray-600 text-white border-2 border-gray-300"
+                      }`}
+                      title={
+                        audioEnabled ? "Mute microphone" : "Enable microphone"
+                      }
+                    >
+                      <span className="text-lg">
+                        {isLoading ? "⏳" : audioEnabled ? "🎤" : "🔇"}
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={toggleVideo}
+                      disabled={isLoading}
+                      className={`p-4 rounded-xl font-bold transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 ${
+                        videoEnabled
+                          ? "bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white"
+                          : "bg-gradient-to-r from-gray-400 to-gray-500 hover:from-gray-500 hover:to-gray-600 text-white border-2 border-gray-300"
+                      }`}
+                      title={videoEnabled ? "Turn off camera" : "Enable camera"}
+                    >
+                      <span className="text-lg">
+                        {isLoading ? "⏳" : videoEnabled ? "📹" : "📷"}
+                      </span>
+                    </button>
                   </>
                 )}
-              </button>
-            ) : (
-              <button
-                onClick={leaveRoom}
-                className="bg-red-600 hover:bg-red-700 text-white px-8 py-3 rounded-xl font-semibold transition-all duration-200 flex items-center gap-3 shadow-lg hover:shadow-xl"
-              >
-                <span>■</span>
-                End Stream
-              </button>
-            )}
+              </div>
 
-            {/* Media Controls - Only show when connected */}
-            {isConnected && (
-              <>
-                <button
-                  onClick={toggleAudio}
-                  className={`p-3 rounded-xl font-semibold transition-all duration-200 shadow-lg hover:shadow-xl ${
-                    audioEnabled
-                      ? "bg-slate-700 hover:bg-slate-600 text-white"
-                      : "bg-red-600 hover:bg-red-700 text-white"
-                  }`}
-                  title={audioEnabled ? "Mute microphone" : "Unmute microphone"}
-                >
-                  <span className="text-lg">{audioEnabled ? "🎤" : "🔇"}</span>
-                </button>
+              {/* Connection Status */}
+              {!isConnected && !isLoading && (
+                <div className="text-center">
+                  <p className="text-gray-600 text-sm font-medium">
+                    Click &quot;Join Room&quot; to connect, then enable your
+                    camera/microphone as needed
+                  </p>
+                  <p className="text-slate-500 text-xs mt-2">
+                    Just like Google Meet - join first, enable media later!
+                  </p>
+                </div>
+              )}
 
-                <button
-                  onClick={toggleVideo}
-                  className={`p-3 rounded-xl font-semibold transition-all duration-200 shadow-lg hover:shadow-xl ${
-                    videoEnabled
-                      ? "bg-slate-700 hover:bg-slate-600 text-white"
-                      : "bg-red-600 hover:bg-red-700 text-white"
-                  }`}
-                  title={videoEnabled ? "Turn off camera" : "Turn on camera"}
-                >
-                  <span className="text-lg">{videoEnabled ? "📹" : "📷"}</span>
-                </button>
-              </>
-            )}
+              {/* Stream Info */}
+              {isConnected && (
+                <div className="text-center mt-4">
+                  <div className="inline-flex items-center gap-6 bg-slate-800/30 rounded-lg px-6 py-3 text-sm text-slate-400">
+                    <span>WebRTC • Low Latency</span>
+                    <span>•</span>
+                    <a
+                      href="/watch"
+                      target="_blank"
+                      className="text-blue-400 hover:text-blue-300 underline"
+                    >
+                      Watch HLS Stream
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Connection Status */}
-          {!isConnected && !isLoading && (
-            <div className="text-center mt-6">
-              <p className="text-slate-400 text-sm">
-                Click &quot;Go Live&quot; to start your stream and connect with others
-              </p>
+          {/* Participants Panel - Right Side (3 columns) */}
+          <div className="col-span-12 lg:col-span-3">
+            <div className="bg-white/80 backdrop-blur-lg rounded-3xl p-6 border border-gray-200 shadow-2xl shadow-gray-200/50">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-gray-800">
+                  Participants
+                </h3>
+                <span className="bg-gradient-to-r from-purple-500 to-blue-500 text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
+                  {participants.length + (isConnected ? 1 : 0)}
+                </span>
+              </div>
+
+              <div className="space-y-4">
+                {/* Your own participant card */}
+                {isConnected && (
+                  <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-2 border-emerald-200 rounded-2xl p-4 shadow-lg">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-xl flex items-center justify-center shadow-lg">
+                        <span className="text-sm font-bold text-white">
+                          You
+                        </span>
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-sm font-bold text-emerald-800">
+                          You (Host)
+                        </p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span
+                            className={`text-xs font-medium ${
+                              audioEnabled ? "text-emerald-600" : "text-red-500"
+                            }`}
+                          >
+                            {audioEnabled ? "🎤 Audio" : "🔇 Muted"}
+                          </span>
+                          <span
+                            className={`text-xs font-medium ${
+                              videoEnabled ? "text-emerald-600" : "text-red-500"
+                            }`}
+                          >
+                            {videoEnabled ? "📹 Video" : "📷 Off"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Remote participants */}
+                {participants.map((participant, index) => (
+                  <RemoteParticipantCard
+                    key={participant.id}
+                    participant={participant}
+                    index={index}
+                  />
+                ))}
+
+                {/* Empty state */}
+                {participants.length === 0 && isConnected && (
+                  <div className="text-center py-8">
+                    <div className="w-16 h-16 mx-auto mb-4 bg-gradient-to-br from-gray-200 to-gray-300 rounded-2xl flex items-center justify-center shadow-lg">
+                      <span className="text-2xl">👥</span>
+                    </div>
+                    <p className="text-gray-600 text-sm font-medium">
+                      Waiting for others to join...
+                    </p>
+                    <p className="text-gray-500 text-xs mt-1">
+                      Share this room with friends!
+                    </p>
+                  </div>
+                )}
+
+                {!isConnected && (
+                  <div className="text-center py-8">
+                    <div className="w-16 h-16 mx-auto mb-4 bg-gradient-to-br from-gray-200 to-gray-300 rounded-2xl flex items-center justify-center opacity-50 shadow-lg">
+                      <span className="text-2xl">👥</span>
+                    </div>
+                    <p className="text-slate-400 text-sm">
+                      Join the room to see participants
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
-          )}
+          </div>
         </div>
-
-        {/* Remote Participants - Only show when there are participants */}
-        {participants.length > 0 && (
-          <div className="mt-8">
-            <h3 className="text-lg font-semibold text-white mb-4">
-              Other Participants
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {participants.map((participant, index) => (
-                <RemoteParticipant
-                  key={participant.id}
-                  participant={participant}
-                  index={index}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Stream Info - Minimized */}
-        {isConnected && (
-          <div className="mt-8 text-center">
-            <div className="inline-flex items-center gap-6 bg-slate-800/30 rounded-lg px-6 py-3 text-sm text-slate-400">
-              <span>WebRTC • Low Latency</span>
-              <span>•</span>
-              <a 
-                href={`/hls/${mediasoupClient.current.getSocket().id}/playlist.m3u8`}
-                target="_blank"
-                className="text-blue-400 hover:text-blue-300 underline"
-              >
-                HLS Stream
-              </a>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
-// Clean Remote Participant Component
-function RemoteParticipant({
+// Enhanced Remote Participant Component
+function RemoteParticipantCard({
   participant,
   index,
 }: {
-  participant: any;
+  participant: Participant;
   index: number;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -404,30 +555,57 @@ function RemoteParticipant({
   }, [participant.track]);
 
   return (
-    <div className="bg-slate-800/50 backdrop-blur-sm rounded-xl overflow-hidden border border-slate-700 shadow-lg">
-      <div className="relative aspect-video bg-slate-900">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          className="w-full h-full object-cover"
-        />
-        
-        {/* Participant Label */}
-        <div className="absolute bottom-3 left-3">
-          <div className="bg-slate-900/80 text-white px-2 py-1 rounded text-sm font-medium">
-            Participant {index + 1}
-          </div>
+    <div className="bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-200 rounded-2xl p-4 shadow-lg">
+      <div className="flex items-center gap-3">
+        <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center relative shadow-lg">
+          <span className="text-sm font-bold text-white">P{index + 1}</span>
+          {participant.track?.kind === "video" && (
+            <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-white shadow-lg"></div>
+          )}
         </div>
-
-        {/* Live Indicator */}
-        <div className="absolute top-3 right-3">
-          <div className="bg-emerald-500 text-white px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1">
-            <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></div>
-            LIVE
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-bold text-blue-800 truncate">
+            Participant {index + 1}
+          </p>
+          <div className="flex items-center gap-2 mt-1">
+            <span
+              className={`text-xs font-medium ${
+                participant.isAudioEnabled ? "text-green-600" : "text-gray-500"
+              }`}
+            >
+              {participant.isAudioEnabled ? "🎤" : "🔇"}
+            </span>
+            <span
+              className={`text-xs font-medium ${
+                participant.isVideoEnabled ? "text-green-600" : "text-gray-500"
+              }`}
+            >
+              {participant.isVideoEnabled ? "📹" : "📷"}
+            </span>
+            <span className="text-xs text-slate-400">
+              {participant.joinedAt
+                ? new Date(participant.joinedAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })
+                : "Now"}
+            </span>
           </div>
         </div>
       </div>
+
+      {/* Small video preview if available */}
+      {participant.track?.kind === "video" && (
+        <div className="mt-3 aspect-video bg-slate-900 rounded overflow-hidden max-h-20">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+          />
+        </div>
+      )}
     </div>
   );
 }

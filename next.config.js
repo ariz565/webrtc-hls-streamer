@@ -14,12 +14,12 @@ const nextConfig = {
   async rewrites() {
     return [
       {
-        source: '/api/socket',
-        destination: 'http://localhost:3001/socket.io/',
+        source: "/api/socket",
+        destination: "http://localhost:3001/socket.io/",
       },
       {
-        source: '/hls/:path*',
-        destination: 'http://localhost:3002/hls/:path*',
+        source: "/hls/:path*",
+        destination: "http://localhost:3001/hls/:path*",
       },
     ];
   },

@@ -22,6 +22,8 @@ dist/
 # HLS output files
 public/hls/*.m3u8
 public/hls/*.ts
+public/hls
+public
 
 # Logs
 *.log

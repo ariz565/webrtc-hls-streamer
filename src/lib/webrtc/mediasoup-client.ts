@@ -54,11 +54,34 @@ export class MediasoupClient {
     });
 
     this.socket.on("newProducer", (data: any) => {
+      console.log("New producer detected:", data);
       this.consume(data.producerId);
     });
 
     this.socket.on("newConsumer", (data: any) => {
       this.handleNewConsumer(data);
+    });
+
+    // Enhanced participant management
+    this.socket.on("participantJoined", (data: any) => {
+      console.log("Participant joined:", data);
+      window.dispatchEvent(
+        new CustomEvent("participantJoined", { detail: data })
+      );
+    });
+
+    this.socket.on("participantLeft", (data: any) => {
+      console.log("Participant left:", data);
+      window.dispatchEvent(
+        new CustomEvent("participantLeft", { detail: data })
+      );
+    });
+
+    this.socket.on("participantUpdate", (data: any) => {
+      console.log("Participant update:", data);
+      window.dispatchEvent(
+        new CustomEvent("participantUpdate", { detail: data })
+      );
     });
   }
 
@@ -277,7 +300,13 @@ export class MediasoupClient {
       });
 
       // Resume the consumer
-      this.socket.emit("resumeConsumer", { consumerId: consumer.id });
+      this.socket.emit("resumeConsumer", { consumerId: consumer.id }, (response: any) => {
+        if (response.error) {
+          console.error("Error resuming consumer:", response.error);
+        } else {
+          console.log("Consumer resumed successfully");
+        }
+      });
 
       console.log("Consumer created:", consumer.id);
 
